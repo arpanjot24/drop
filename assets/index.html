@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Drop</title>
+<style>
+  :root { color-scheme: light dark; --line: #8884; --accent: #1f6feb; }
+  * { box-sizing: border-box; }
+  body { font: 16px/1.4 system-ui, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; opacity: .6; margin: 28px 0 8px; }
+  #zone { border: 2px dashed var(--line); border-radius: 12px; padding: 40px 16px; text-align: center; cursor: pointer; }
+  body.over #zone { border-color: var(--accent); background: #1f6feb18; }
+  form { display: flex; gap: 8px; margin-top: 12px; }
+  textarea { flex: 1; font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 8px; resize: vertical; min-height: 42px; }
+  button { font: inherit; padding: 8px 14px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; cursor: pointer; }
+  .row { display: flex; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .row > :first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .row small { opacity: .6; white-space: nowrap; }
+  .row a { color: var(--accent); }
+  .empty { opacity: .5; padding: 10px 0; }
+</style>
+<h1>Drop</h1>
+<div id="zone">Drop files anywhere, or click to choose<input id="pick" type="file" multiple hidden></div>
+<form id="tf"><textarea id="t" rows="1" placeholder="Text or link to send to phone"></textarea><button>Send</button></form>
+<div id="ups"></div>
+<h2>From phone</h2>
+<div id="list"><div class="empty">Nothing yet. Use “Send files” in the app, or share to Drop from any app.</div></div>
+<script>
+const $ = id => document.getElementById(id);
+const size = n => n < 0 ? '' : n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : n < 1073741824 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1073741824).toFixed(2) + ' GB';
+const queue = []; let busy = false;
+
+function row(text, note) {
+  const r = document.createElement('div'); r.className = 'row';
+  const a = document.createElement('span'); a.textContent = text;
+  const b = document.createElement('small'); b.textContent = note;
+  r.append(a, b); return r;
+}
+function enqueue(files) {
+  for (const f of files) { const r = row(f.name, 'waiting'); $('ups').prepend(r); queue.push([f, r.lastChild]); }
+  next();
+}
+function next() {
+  if (busy || !queue.length) return;
+  busy = true;
+  const [f, note] = queue.shift();
+  const x = new XMLHttpRequest();
+  x.open('PUT', '/up?name=' + encodeURIComponent(f.name));
+  x.setRequestHeader('X-Drop', '1');
+  x.upload.onprogress = e => note.textContent = Math.floor(e.loaded / e.total * 100) + '%';
+  x.onloadend = () => { note.textContent = x.status == 200 ? 'sent ✓' : 'failed'; busy = false; next(); };
+  x.send(f);
+}
+$('zone').onclick = () => $('pick').click();
+$('pick').onchange = e => { enqueue(e.target.files); e.target.value = ''; };
+addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('over'); });
+addEventListener('dragleave', () => document.body.classList.remove('over'));
+addEventListener('drop', e => { e.preventDefault(); document.body.classList.remove('over'); enqueue([...e.dataTransfer.files].filter(f => f.size || f.type)); });
+addEventListener('paste', e => { if (e.clipboardData.files.length) { e.preventDefault(); enqueue(e.clipboardData.files); } });
+
+async function sendText() {
+  const v = $('t').value; if (!v.trim()) return;
+  const r = row(v, 'sending'); $('ups').prepend(r);
+  try {
+    const res = await fetch('/text', { method: 'POST', headers: { 'X-Drop': '1' }, body: v });
+    r.lastChild.textContent = res.ok ? 'sent ✓' : 'failed'; if (res.ok) $('t').value = '';
+  } catch { r.lastChild.textContent = 'failed'; }
+}
+$('tf').onsubmit = e => { e.preventDefault(); sendText(); };
+$('t').onkeydown = e => { if (e.key == 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); } };
+
+let last = '';
+async function poll() {
+  try {
+    const res = await fetch('/list');
+    if (res.status == 403) return location.reload();
+    const txt = await res.text();
+    if (txt != last) {
+      last = txt;
+      const items = JSON.parse(txt), list = $('list');
+      list.textContent = '';
+      for (const it of items) {
+        let r;
+        if (it.text != null) {
+          r = row(it.text, '');
+          const b = document.createElement('a'); b.href = '#'; b.textContent = 'Copy';
+          b.onclick = e => { e.preventDefault(); copy(it.text); b.textContent = 'Copied'; };
+          r.append(b);
+        } else {
+          r = row(it.name, size(it.size));
+          const a = document.createElement('a'); a.href = '/f/' + it.id; a.textContent = 'Download'; a.download = it.name;
+          r.append(a);
+        }
+        list.append(r);
+      }
+      if (!items.length) list.innerHTML = '<div class="empty">Nothing yet.</div>';
+    }
+  } catch {}
+}
+function copy(s) { // navigator.clipboard needs https, so use the old way
+  const t = document.createElement('textarea'); t.value = s; document.body.append(t); t.select();
+  document.execCommand('copy'); t.remove();
+}
+poll(); setInterval(poll, 1500);
+</script>
+</html>
