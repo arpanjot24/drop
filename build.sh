@@ -5,10 +5,11 @@
 set -e
 cd "$(dirname "$0")"
 unset JAVA_TOOL_OPTIONS
+V="${VERSION_CODE:-2}"   # releases are tagged v$V; the app updates when it sees a higher number
 rm -rf build && mkdir -p build/classes
 aapt2 compile --dir res -o build/res.zip
 aapt2 link -o build/base.apk -I android.jar --manifest AndroidManifest.xml -A assets \
-  --min-sdk-version 29 --target-sdk-version 34 --version-code 1 --version-name 1.0 build/res.zip
+  --min-sdk-version 29 --target-sdk-version 34 --version-code "$V" --version-name "$V" build/res.zip
 javac -nowarn --release 8 -cp android.jar -d build/classes src/app/drop/*.java
 dalvik-exchange --dex --min-sdk-version=26 --output=build/classes.dex build/classes
 (cd build && zip -q base.apk classes.dex && zipalign -f 4 base.apk aligned.apk)

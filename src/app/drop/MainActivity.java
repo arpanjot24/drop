@@ -2,6 +2,7 @@ package app.drop;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ContentResolver;
@@ -19,6 +20,7 @@ import android.provider.OpenableColumns;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
+import android.content.pm.PackageInstaller;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -33,27 +35,36 @@ import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.net.URLConnection;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 public class MainActivity extends Activity implements Server.Host {
     private static Server server;
-    private static final StringBuilder log = new StringBuilder();
+    /** One row in the activity list. Received rows (in=true) survive restarts. */
+    static class Entry { boolean in; String label, uri, mime, text; }
+    private static final ArrayList<Entry> entries = new ArrayList<Entry>();
+    private static boolean loaded, updateChecked;
     private static final Set<String> allowed = Collections.synchronizedSet(new HashSet<String>());
     private static final Set<String> denied = Collections.synchronizedSet(new HashSet<String>());
     private static final Set<String> asking = Collections.synchronizedSet(new HashSet<String>());
 
     private final Handler main = new Handler(Looper.getMainLooper());
-    private TextView urlView, logView;
+    private TextView urlView;
+    private LinearLayout listView;
+    private int pad;
     private byte[] page;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        int p = (int) (24 * getResources().getDisplayMetrics().density);
+        int p = pad = (int) (24 * getResources().getDisplayMetrics().density);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -80,17 +91,19 @@ public class MainActivity extends Activity implements Server.Host {
             if (t == null || t.length() == 0) toast("Clipboard is empty"); else shareText(t.toString());
         } }));
         root.addView(button("Clear", new View.OnClickListener() { public void onClick(View v) {
-            server.clear(); log.setLength(0); logView.setText("");
+            if (server != null) server.clear();
+            entries.clear(); persist(); render();
         } }));
 
-        logView = new TextView(this);
-        logView.setTextIsSelectable(true);
-        logView.setPadding(0, p, 0, 0);
-        logView.setText(log);
+        listView = new LinearLayout(this);
+        listView.setOrientation(LinearLayout.VERTICAL);
+        listView.setPadding(0, p / 2, 0, 0);
         ScrollView sv = new ScrollView(this);
-        sv.addView(logView);
+        sv.addView(listView);
         root.addView(sv);
         setContentView(root);
+        load();
+        render();
 
         allowed.addAll(prefs().getStringSet("allowed", new HashSet<String>()));
         if (server == null) {
@@ -99,6 +112,7 @@ public class MainActivity extends Activity implements Server.Host {
             try { s.start(8080); server = s; } catch (IOException e) { urlView.setText("Could not start: " + e.getMessage()); }
         } else server.host = this;
         handle(getIntent());
+        if (!updateChecked) { updateChecked = true; Updater.check(this); }
     }
 
     @Override protected void onResume() { super.onResume(); showUrl(); }
@@ -118,7 +132,16 @@ public class MainActivity extends Activity implements Server.Host {
 
     /** Things shared to Drop from other apps. */
     private void handle(Intent i) {
-        if (i == null || i.getAction() == null || server == null) return;
+        if (i == null || i.getAction() == null) return;
+        if (Updater.ACTION.equals(i.getAction())) {
+            int st = i.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
+            Intent confirm = i.getParcelableExtra(Intent.EXTRA_INTENT);
+            if (st == PackageInstaller.STATUS_PENDING_USER_ACTION && confirm != null) startActivity(confirm);
+            else if (st != PackageInstaller.STATUS_SUCCESS) toast("Update failed: " + i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE));
+            i.setAction(null);
+            return;
+        }
+        if (server == null) return;
         if (Intent.ACTION_SEND.equals(i.getAction())) {
             Uri u = i.getParcelableExtra(Intent.EXTRA_STREAM);
             if (u != null) shareFile(u);
@@ -143,14 +166,14 @@ public class MainActivity extends Activity implements Server.Host {
         } catch (Exception e) { }
         if (it.name == null) it.name = "file";
         server.add(it);
-        line("↑ " + it.name);
+        add(false, "↑ " + it.name, null, null, null);
     }
 
     private void shareText(String t) {
         Server.Item it = new Server.Item();
         it.text = t;
         server.add(it);
-        line("↑ " + t);
+        add(false, "↑ " + t, null, null, null);
     }
 
     // ---- Server.Host (called on server threads) ----
@@ -195,6 +218,8 @@ public class MainActivity extends Activity implements Server.Host {
         v.clear();
         v.put(MediaStore.MediaColumns.IS_PENDING, 0);
         cr.update(u, v, null, null);
+        final String uri = u.toString(), type = cr.getType(u), shown = name;
+        main.post(new Runnable() { public void run() { add(true, shown, uri, type == null ? "*/*" : type, null); } });
         return name;
     }
 
@@ -211,14 +236,12 @@ public class MainActivity extends Activity implements Server.Host {
         return 0;
     }
 
-    public void onFile(final String name) {
-        main.post(new Runnable() { public void run() { line("↓ " + name + "  (Downloads/Drop)"); } });
-    }
+    public void onFile(String name) { }  // the row is added in save(), where the file's Uri is known
 
     public void onText(final String text) {
         main.post(new Runnable() { public void run() {
             ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Drop", text));
-            line("↓ " + text + "  (copied)");
+            add(true, text, null, null, text);
         } });
     }
 
@@ -264,11 +287,105 @@ public class MainActivity extends Activity implements Server.Host {
         return b;
     }
 
-    private void line(String s) {
-        if (s.length() > 300) s = s.substring(0, 300) + "…";
-        log.insert(0, s + "\n\n");
-        logView.setText(log);
+    private void add(boolean in, String label, String uri, String mime, String text) {
+        Entry e = new Entry();
+        e.in = in; e.label = label.length() > 300 ? label.substring(0, 300) + "…" : label;
+        e.uri = uri; e.mime = mime; e.text = text;
+        entries.add(0, e);
+        while (entries.size() > 50) entries.remove(entries.size() - 1);
+        if (in) persist();
+        render();
     }
+
+    /** Received files and text get Open / Share / Copy right here, so there is no trip to the file manager. */
+    private void render() {
+        listView.removeAllViews();
+        for (final Entry e : entries) {
+            TextView t = new TextView(this);
+            t.setText(e.in ? "↓ " + e.label : e.label);
+            t.setTextSize(16);
+            t.setPadding(0, pad / 2, 0, 0);
+            listView.addView(t);
+            if (!e.in) continue;
+            LinearLayout row = new LinearLayout(this);
+            if (e.uri != null) {
+                row.addView(action("Open", new View.OnClickListener() { public void onClick(View v) {
+                    launch(new Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse(e.uri), e.mime)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION));
+                } }));
+            } else {
+                row.addView(action("Copy", new View.OnClickListener() { public void onClick(View v) {
+                    ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Drop", e.text));
+                    toast("Copied");
+                } }));
+            }
+            row.addView(action("Share", new View.OnClickListener() { public void onClick(View v) {
+                Intent i = new Intent(Intent.ACTION_SEND);
+                if (e.uri != null) {
+                    Uri u = Uri.parse(e.uri);
+                    i.setType(e.mime).putExtra(Intent.EXTRA_STREAM, u).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    i.setClipData(ClipData.newRawUri(e.label, u));
+                } else i.setType("text/plain").putExtra(Intent.EXTRA_TEXT, e.text);
+                launch(Intent.createChooser(i, null));
+            } }));
+            listView.addView(row);
+        }
+    }
+
+    private void launch(Intent i) {
+        try { startActivity(i); }
+        catch (ActivityNotFoundException e) { toast("No app can open this"); }
+        catch (SecurityException e) { toast("File is no longer available"); }
+    }
+
+    private Button action(String text, View.OnClickListener l) {
+        Button b = new Button(this, null, android.R.attr.borderlessButtonStyle);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setMinWidth(0); b.setMinimumWidth(0);
+        b.setPadding(0, 0, pad, 0);
+        b.setOnClickListener(l);
+        return b;
+    }
+
+    private void persist() {
+        JSONArray a = new JSONArray();
+        try {
+            for (Entry e : entries) if (e.in)
+                a.put(new JSONObject().put("label", e.label).put("uri", e.uri).put("mime", e.mime).put("text", e.text));
+        } catch (Exception ex) { }
+        prefs().edit().putString("received", a.toString()).apply();
+    }
+
+    private void load() {
+        if (loaded) return;
+        loaded = true;
+        try {
+            JSONArray a = new JSONArray(prefs().getString("received", "[]"));
+            for (int i = 0; i < a.length(); i++) {
+                JSONObject o = a.getJSONObject(i);
+                Entry e = new Entry();
+                e.in = true; e.label = o.getString("label");
+                e.uri = o.optString("uri", null); e.mime = o.optString("mime", null); e.text = o.optString("text", null);
+                entries.add(e);
+            }
+        } catch (Exception ex) { }
+    }
+
+    /** Called by Updater on the main thread once a newer APK has been downloaded. */
+    void offerUpdate(final int version, final File apk) {
+        if (isFinishing()) return;
+        new AlertDialog.Builder(this)
+            .setTitle("Update ready")
+            .setMessage("Version " + version + " has been downloaded. Drop will close while it installs.")
+            .setPositiveButton("Install", new DialogInterface.OnClickListener() { public void onClick(DialogInterface d, int w) {
+                try { Updater.install(MainActivity.this, apk); } catch (Exception e) { toast("Update failed: " + e.getMessage()); }
+            } })
+            .setNegativeButton("Later", null)
+            .show();
+    }
+
+    void onMain(Runnable r) { main.post(r); }
 
     private void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
     private SharedPreferences prefs() { return getSharedPreferences("drop", MODE_PRIVATE); }

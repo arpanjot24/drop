@@ -1,0 +1,36 @@
+# Every push to main builds a signed APK and publishes it as a GitHub Release.
+# Installed copies of Drop check the latest release on launch and offer to update.
+#
+# One-time setup: add a repository secret named KEYSTORE_B64 containing `base64 -w0 drop.keystore`.
+# The key must stay the same forever, or phones will refuse the update.
+name: Release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y aapt apksigner zipalign dalvik-exchange
+      - name: Fetch Android framework jar
+        run: curl -fsSL -o android.jar https://repo1.maven.org/maven2/org/robolectric/android-all/14-robolectric-10818077/android-all-14-robolectric-10818077.jar
+      - name: Restore signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64" || { echo "::error::Add the KEYSTORE_B64 repository secret first"; exit 1; }
+          echo "$KEYSTORE_B64" | base64 -d > drop.keystore
+      - name: Build
+        run: |
+          echo "$GITHUB_REPOSITORY" > assets/repo.txt
+          echo "VERSION_CODE=$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_ENV"
+          VERSION_CODE=$((GITHUB_RUN_NUMBER + 100)) ./build.sh
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v$VERSION_CODE" Drop.apk --title "Drop v$VERSION_CODE" --generate-notes
