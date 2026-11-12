@@ -12,6 +12,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -59,6 +60,7 @@ public class MainActivity extends Activity implements Server.Host {
     private LinearLayout listView;
     private int pad;
     private byte[] page;
+    private WifiManager.MulticastLock lock;  // lets the PC companion's broadcast probe reach us
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -115,7 +117,19 @@ public class MainActivity extends Activity implements Server.Host {
         if (!updateChecked) { updateChecked = true; Updater.check(this); }
     }
 
-    @Override protected void onResume() { super.onResume(); showUrl(); }
+    @Override protected void onResume() {
+        super.onResume();
+        showUrl();
+        try {
+            if (lock == null) lock = ((WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE)).createMulticastLock("drop");
+            lock.acquire();
+        } catch (Exception e) { }
+    }
+
+    @Override protected void onPause() {
+        super.onPause();
+        try { if (lock != null && lock.isHeld()) lock.release(); } catch (Exception e) { }
+    }
     @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); handle(i); }
 
     @Override protected void onDestroy() {

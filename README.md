@@ -9,6 +9,14 @@ The phone runs a tiny web server; the computer just opens the address shown in t
 - New computers must be approved once on the phone.
 - The app updates itself from this repository's GitHub Releases.
 
+## Windows portal (optional)
+
+`pc/DropPortal.cs` is a small tray app. It probes the network for a phone running Drop and, while one
+is open, shows a drop target on the right edge of the screen. Drag files or text onto it to send them;
+click it to open the full page. It adds itself to Windows startup on first run (toggle in the tray menu).
+
+    mcs -target:winexe -r:System.Windows.Forms.dll -r:System.Drawing.dll -out:DropPortal.exe pc/DropPortal.cs
+
 ## Releasing an update
 
 Push to `main`. The workflow in `.github/workflows/release.yml` builds, signs and publishes `Drop.apk`

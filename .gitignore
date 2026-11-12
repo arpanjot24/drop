@@ -4,3 +4,4 @@ android.jar
 *.apk
 *.idsig
 *.zip
+*.exe

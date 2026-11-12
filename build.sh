@@ -5,7 +5,7 @@
 set -e
 cd "$(dirname "$0")"
 unset JAVA_TOOL_OPTIONS
-V="${VERSION_CODE:-2}"   # releases are tagged v$V; the app updates when it sees a higher number
+V="${VERSION_CODE:-3}"   # releases are tagged v$V; the app updates when it sees a higher number
 rm -rf build && mkdir -p build/classes
 aapt2 compile --dir res -o build/res.zip
 aapt2 link -o build/base.apk -I android.jar --manifest AndroidManifest.xml -A assets \

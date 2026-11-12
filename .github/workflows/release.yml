@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y aapt apksigner zipalign dalvik-exchange
+        run: sudo apt-get update && sudo apt-get install -y aapt apksigner zipalign dalvik-exchange mono-mcs libmono-system-windows-forms4.0-cil
       - name: Fetch Android framework jar
         run: curl -fsSL -o android.jar https://repo1.maven.org/maven2/org/robolectric/android-all/14-robolectric-10818077/android-all-14-robolectric-10818077.jar
       - name: Restore signing key
@@ -30,7 +30,8 @@ jobs:
           echo "$GITHUB_REPOSITORY" > assets/repo.txt
           echo "VERSION_CODE=$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_ENV"
           VERSION_CODE=$((GITHUB_RUN_NUMBER + 100)) ./build.sh
+          mcs -target:winexe -optimize -r:System.Windows.Forms.dll -r:System.Drawing.dll -out:DropPortal.exe pc/DropPortal.cs
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "v$VERSION_CODE" Drop.apk --title "Drop v$VERSION_CODE" --generate-notes
+        run: gh release create "v$VERSION_CODE" Drop.apk DropPortal.exe --title "Drop v$VERSION_CODE" --generate-notes

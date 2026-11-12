@@ -6,6 +6,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
@@ -34,7 +36,10 @@ public class Server {
 
     public volatile Host host;
     public int port;
+    /** UDP port the PC companion probes to find the phone ("DROP?" -> "DROP!<http port>"). */
+    public static final int DISCOVERY_PORT = 8079;
     private ServerSocket ss;
+    private DatagramSocket ds;
     private final List<Item> items = new ArrayList<Item>();
     private int nextId = 1;
 
@@ -45,9 +50,29 @@ public class Server {
         }
         if (ss == null) throw last;
         new Thread(new Runnable() { public void run() { acceptLoop(); } }, "drop-accept").start();
+        try {
+            ds = new DatagramSocket(DISCOVERY_PORT);
+            new Thread(new Runnable() { public void run() { discoveryLoop(); } }, "drop-discovery").start();
+        } catch (IOException e) { /* port taken: the browser page still works, only auto-discovery is off */ }
     }
 
-    public void stop() { try { ss.close(); } catch (Exception e) { } }
+    private void discoveryLoop() {
+        byte[] buf = new byte[64];
+        while (true) {
+            try {
+                DatagramPacket p = new DatagramPacket(buf, buf.length);
+                ds.receive(p);
+                if (!new String(p.getData(), 0, p.getLength(), "UTF-8").equals("DROP?")) continue;
+                byte[] r = ("DROP!" + port).getBytes("UTF-8");
+                ds.send(new DatagramPacket(r, r.length, p.getAddress(), p.getPort()));
+            } catch (IOException e) { if (ds.isClosed()) return; }
+        }
+    }
+
+    public void stop() {
+        try { ss.close(); } catch (Exception e) { }
+        if (ds != null) ds.close();
+    }
 
     public void add(Item it) { synchronized (items) { it.id = nextId++; items.add(0, it); } }
     public void clear() { synchronized (items) { items.clear(); } }
