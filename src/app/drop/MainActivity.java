@@ -13,6 +13,7 @@ import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -138,6 +139,12 @@ public class MainActivity extends Activity implements Server.Host {
     }
 
     @Override protected void onActivityResult(int req, int res, Intent d) {
+        if (req == REQ_DELETE) {                 // answer to Android's "allow Drop to delete this file?" prompt
+            Entry e = pendingDelete;
+            pendingDelete = null;
+            if (res == RESULT_OK && e != null) removeEntry(e);
+            return;
+        }
         if (res != RESULT_OK || d == null) return;
         if (d.getClipData() != null) {
             for (int i = 0; i < d.getClipData().getItemCount(); i++) shareFile(d.getClipData().getItemAt(i).getUri());
@@ -342,6 +349,7 @@ public class MainActivity extends Activity implements Server.Host {
                     toast("Copied");
                 } }));
             }
+            row.addView(action("Delete", new View.OnClickListener() { public void onClick(View v) { confirmDelete(e); } }));
             row.addView(action("Share", new View.OnClickListener() { public void onClick(View v) {
                 Intent i = new Intent(Intent.ACTION_SEND);
                 if (e.uri != null) {
@@ -353,6 +361,50 @@ public class MainActivity extends Activity implements Server.Host {
             } }));
             listView.addView(row);
         }
+    }
+
+    private static final int REQ_DELETE = 2;
+    private Entry pendingDelete;
+
+    private void confirmDelete(final Entry e) {
+        boolean file = e.uri != null;
+        new AlertDialog.Builder(this)
+            .setTitle(file ? "Delete file?" : "Remove text?")
+            .setMessage(file ? "\"" + e.label + "\" will be deleted from this phone (Downloads/Drop)."
+                             : "It will be removed from this list.")
+            .setPositiveButton("Delete", new DialogInterface.OnClickListener() { public void onClick(DialogInterface d, int w) { delete(e); } })
+            .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    /** Deletes a received file from Downloads/Drop and drops its row. */
+    private void delete(Entry e) {
+        if (e.uri != null) {
+            Uri u = Uri.parse(e.uri);
+            try {
+                getContentResolver().delete(u, null, null);  // 0 rows = already gone, which is fine too
+            } catch (SecurityException ex) {
+                // Files saved before a reinstall belong to the old copy of the app: Android 11+ can ask the user instead.
+                if (Build.VERSION.SDK_INT >= 30) {
+                    try {
+                        pendingDelete = e;
+                        startIntentSenderForResult(MediaStore.createDeleteRequest(getContentResolver(), Collections.singletonList(u)).getIntentSender(),
+                            REQ_DELETE, null, 0, 0, 0);
+                        return;
+                    } catch (Exception x) { pendingDelete = null; }
+                }
+                toast("Could not delete the file");
+                return;
+            }
+        }
+        removeEntry(e);
+    }
+
+    private void removeEntry(Entry e) {
+        entries.remove(e);
+        persist();
+        render();
+        toast(e.uri != null ? "Deleted" : "Removed");
     }
 
     private void launch(Intent i) {
