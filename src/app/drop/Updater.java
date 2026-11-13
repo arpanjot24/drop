@@ -25,13 +25,17 @@ import java.net.URL;
 class Updater {
     static final String ACTION = "app.drop.INSTALL";
 
-    static void check(final MainActivity a) {
+    /** Background check; failures are silent and remembered for "Check for updates". */
+    static void check(final MainActivity a) { check(a, false); }
+
+    /** manual = the user asked: report every outcome on screen. */
+    static void check(final MainActivity a, final boolean manual) {
         new Thread(new Runnable() { public void run() {
             try {
                 String repo;
                 try (InputStream in = a.getAssets().open("repo.txt")) { repo = new String(read(in), "UTF-8").trim(); }
-                if (!repo.matches("[\\w.-]+/[\\w.-]+")) return;
-                long current = a.getPackageManager().getPackageInfo(a.getPackageName(), 0).getLongVersionCode();
+                if (!repo.matches("[\\w.-]+/[\\w.-]+")) { report(a, manual, "This build has no update source (local build)"); return; }
+                final long current = a.getPackageManager().getPackageInfo(a.getPackageName(), 0).getLongVersionCode();
 
                 // A release may carry only the Windows portal, so find the newest one that has an APK.
                 JSONArray rels;
@@ -53,18 +57,30 @@ class Updater {
                     }
                 }
                 final int latest = best;
-                if (latest <= current) return;
-                if (url == null || !url.startsWith("https://github.com/" + repo + "/")) return;
+                if (latest <= current) { report(a, manual, "Drop is up to date (v" + current + ")"); return; }
+                if (url == null || !url.startsWith("https://github.com/" + repo + "/")) { report(a, manual, "Update link looks wrong, skipped"); return; }
 
+                report(a, manual, "Downloading v" + latest + "…");
                 final File apk = new File(a.getCacheDir(), "update-" + latest + ".apk");
                 if (!apk.exists()) {
                     File tmp = new File(a.getCacheDir(), "update.tmp");
                     try (InputStream in = get(url); OutputStream out = new FileOutputStream(tmp)) { copy(in, out); }
-                    if (!tmp.renameTo(apk)) return;
+                    if (!tmp.renameTo(apk)) throw new java.io.IOException("could not save the download");
                 }
+                lastError = null;
                 a.onMain(new Runnable() { public void run() { a.offerUpdate(latest, apk); } });
-            } catch (Exception e) { /* offline, no release yet, rate-limited: try again next launch */ }
+            } catch (Throwable e) {
+                // offline, rate-limited, ...: try again later; keep the reason for "Check for updates"
+                lastError = e.getClass().getSimpleName() + (e.getMessage() != null ? ": " + e.getMessage() : "");
+                report(a, true, manual ? "Update check failed: " + lastError : "Update check failed — tap the version to see why");
+            }
         } }, "drop-update").start();
+    }
+
+    static volatile String lastError;
+
+    private static void report(final MainActivity a, boolean show, final String msg) {
+        if (show) a.onMain(new Runnable() { public void run() { a.notice(msg); } });
     }
 
     static void install(MainActivity a, File apk) throws Exception {

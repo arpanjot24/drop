@@ -92,7 +92,14 @@ public class MainActivity extends Activity implements Server.Host {
         head.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
         String ver = "";
         try { ver = "v" + getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { }
-        head.addView(text(ver, 13, col(MUTED), false));
+        TextView verView = text(ver + " · Check for updates", 13, col(MUTED), false);
+        verView.setPadding(dp(8), dp(8), 0, dp(8));
+        verView.setOnClickListener(new View.OnClickListener() { public void onClick(View v) {
+            toast("Checking for updates…");
+            lastUpdateCheck = System.currentTimeMillis();
+            Updater.check(MainActivity.this, true);
+        } });
+        head.addView(verView);
         root.addView(head);
 
         // Connection card: the address to open on the computer
@@ -624,5 +631,7 @@ public class MainActivity extends Activity implements Server.Host {
     void onMain(Runnable r) { main.post(r); }
 
     private void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
+    /** Longer message, used by Updater to say what happened. */
+    void notice(String s) { if (!isFinishing()) Toast.makeText(this, s, Toast.LENGTH_LONG).show(); }
     private SharedPreferences prefs() { return getSharedPreferences("drop", MODE_PRIVATE); }
 }
