@@ -23,8 +23,9 @@ crashes on Windows .NET):
 Files and text you send from the phone ("Send files" / "Send clipboard") appear as rows under the drop
 target; click a file to save it and open it, or click text to copy it. Right-click a row to ignore it
 (hide it on this PC) or delete it (PC copy to the Recycle Bin, and removed from Drop's list on the phone;
-the original file on the phone is never touched). Files are saved to `Downloads\Drop` by default; change
-it with "Save received files to…" in the tray menu.
+the original file on the phone is never touched). Files are saved to `Downloads\Drop` by default. The gear on the panel (or "Settings…" in the tray menu)
+changes the folder, can ask where to save each file, or saves new files from the phone automatically;
+right-click a file for "Save as…".
 
 It finds the phone by broadcast, and also probes each address on the local network directly, since many
 routers drop broadcasts.

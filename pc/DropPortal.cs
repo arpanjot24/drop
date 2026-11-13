@@ -90,32 +90,26 @@ class Portal : Form {
 
     static string Key(PhoneItem it) { return it.Id + "|" + (it.Name ?? it.Text); }
 
-    // ---- where received files go (changeable from the tray menu) ----
-    static string SaveDir() {
-        try {
-            using (var k = Registry.CurrentUser.OpenSubKey(AppKey)) {
-                var s = k == null ? null : k.GetValue("saveDir") as string;
-                if (!string.IsNullOrEmpty(s)) return s;
-            }
-        } catch { }
-        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "Drop");
+    // ---- where received files go (changed in Settings) ----
+    static string SaveDir() { return Prefs.SaveDir; }
+
+    SettingsWindow settings;
+    void ShowSettings() {
+        if (settings != null && !settings.IsDisposed) { settings.Activate(); return; }
+        settings = new SettingsWindow(delegate { CheckUpdate(true); });
+        settings.FormClosed += delegate { SetStatus("Saving to " + FolderName(SaveDir())); Invalidate(); };
+        settings.Show();
     }
 
-    void ChooseSaveDir() {
-        using (var d = new FolderBrowserDialog { Description = "Where should files from your phone be saved?", SelectedPath = SaveDir(), ShowNewFolderButton = true }) {
-            if (d.ShowDialog() != DialogResult.OK) return;
-            try { Registry.CurrentUser.CreateSubKey(AppKey).SetValue("saveDir", d.SelectedPath); } catch { }
-            SetStatus("Saving to " + Path.GetFileName(d.SelectedPath.TrimEnd('\\')));
-            try { tray.ShowBalloonTip(4000, "Drop", "Files from your phone will be saved to\n" + d.SelectedPath, ToolTipIcon.Info); } catch { }
-        }
-    }
+    static string FolderName(string dir) { var n = Path.GetFileName(dir.TrimEnd('\\')); return string.IsNullOrEmpty(n) ? dir : n; }
 
-    // ---- per-row menu: open / show / ignore / delete ----
+    // ---- per-row menu: open / save as / show / ignore / delete ----
     void RowMenu(PhoneItem it, Point at) {
         var m = new ContextMenuStrip();
         string have;
         bool local = it.Text == null && fetched.TryGetValue(phone + "/" + Key(it), out have) && File.Exists(have);
         m.Items.Add(it.Text != null ? "Copy text" : "Open", null, delegate { OpenItem(it); });
+        if (it.Text == null) m.Items.Add("Save as…", null, delegate { SaveAs(it); });
         if (local) m.Items.Add("Show in folder", null, delegate {
             try { Process.Start("explorer.exe", "/select,\"" + fetched[phone + "/" + Key(it)] + "\""); } catch { }
         });
@@ -179,17 +173,16 @@ class Portal : Form {
         Reshape();
         var h = Handle;                      // create the window handle now so BeginInvoke works while hidden
 
-        foreach (var a in args) AddPath(a);  // files passed on the command line are sent once the phone appears
+        foreach (var a in args) {
+            if (a == "--settings") BeginInvoke((MethodInvoker)delegate { ShowSettings(); });
+            else AddPath(a);                  // files passed on the command line are sent once the phone appears
+        }
 
         var menu = new ContextMenuStrip();
-        var startup = new ToolStripMenuItem("Start with Windows") { CheckOnClick = true };
         using (var k = Registry.CurrentUser.CreateSubKey(AppKey)) {
             if (k.GetValue("init") == null) { k.SetValue("init", 1); SetStartup(true); }
         }
-        startup.Checked = GetStartup();
-        startup.CheckedChanged += delegate { SetStartup(startup.Checked); };
-        menu.Items.Add(startup);
-        menu.Items.Add("Save received files to…", null, delegate { ChooseSaveDir(); });
+        menu.Items.Add("Settings…", null, delegate { ShowSettings(); });
         menu.Items.Add("Open received files folder", null, delegate {
             try { Directory.CreateDirectory(SaveDir()); Process.Start("explorer.exe", "\"" + SaveDir() + "\""); } catch { }
         });
@@ -201,7 +194,7 @@ class Portal : Form {
         // Look for a newer portal on GitHub shortly after start, then every 6 hours.
         var upd = new System.Windows.Forms.Timer { Interval = 20000 };
         upd.Tick += delegate { upd.Interval = 6 * 3600 * 1000; CheckUpdate(false); };
-        upd.Start();
+        if (BuildInfo.Version > 0) upd.Start();   // local builds only check when asked, so they are not replaced by an older release
         tray.Icon = MakeIcon();
         tray.Text = "Drop: waiting for phone";
         tray.ContextMenuStrip = menu;
@@ -330,7 +323,9 @@ class Portal : Form {
                 items = list;
                 hoverRow = -1;
                 Relayout();
-                if (grew && !busy && !downloading) SetStatus("From phone: click to open,\nright-click to ignore or delete");
+                if (grew && !busy && !downloading)
+                    SetStatus(Prefs.AutoSave ? "New from phone, saving…" : "From phone: click to open,\nright-click for more");
+                AutoFetch();
             });
         });
     }
@@ -432,31 +427,76 @@ class Portal : Form {
         }
         string key = phone + "/" + Key(it), have;
         if (fetched.TryGetValue(key, out have) && File.Exists(have)) { Launch(have); return; }
-        if (downloading) return;
+        string dest = null;
+        if (Prefs.AskEachTime) { dest = AskPath(it); if (dest == null) return; }
+        Fetch(it, dest, true, false);
+    }
+
+    void SaveAs(PhoneItem it) {
+        string dest = AskPath(it);
+        if (dest != null) Fetch(it, dest, false, false);
+    }
+
+    // "Save as" dialog, starting in the save folder.
+    string AskPath(PhoneItem it) {
+        using (var d = new SaveFileDialog { FileName = SafeName(it.Name), InitialDirectory = SaveDir(), Filter = "All files (*.*)|*.*", OverwritePrompt = true, Title = "Save file from phone" }) {
+            try { Directory.CreateDirectory(SaveDir()); } catch { }
+            return d.ShowDialog(this) == DialogResult.OK ? d.FileName : null;
+        }
+    }
+
+    // With "Save files from phone automatically" on, download each new file once, one at a time.
+    readonly HashSet<string> autoTried = new HashSet<string>();
+    void AutoFetch() {
+        if (!Prefs.AutoSave || downloading || phone == null || !approved) return;
+        foreach (var it in items) {
+            if (it.Text != null) continue;
+            string key = phone + "/" + Key(it);
+            if (fetched.ContainsKey(key) || !autoTried.Add(key)) continue;
+            Fetch(it, null, false, true);
+            return;
+        }
+    }
+
+    void Fetch(PhoneItem it, string dest, bool open, bool auto) {
+        if (downloading) { if (!auto) SetStatus("Still receiving, try again in a moment"); return; }
+        string key = phone + "/" + Key(it), target = phone;
         downloading = true;
-        string target = phone;
         ThreadPool.QueueUserWorkItem(delegate {
             string path = null, why = null;
-            try { path = Download(target, it); }
+            try { path = Download(target, it, dest); }
             catch (Exception e) { why = Reason(e); }
             BeginInvoke((MethodInvoker)delegate {
                 downloading = false;
-                if (path == null) { SetStatus("Could not get " + it.Name + "\n" + why); return; }
-                fetched[key] = path;
-                SetStatus("Saved to " + Path.GetFileName(Path.GetDirectoryName(path)));
-                Launch(path);
+                if (path == null) SetStatus("Could not get " + it.Name + "\n" + why);
+                else {
+                    fetched[key] = path;
+                    SetStatus("Saved to " + FolderName(Path.GetDirectoryName(path)) + " ✓");
+                    if (auto) { try { tray.ShowBalloonTip(3000, "Saved from phone", it.Name + "\n" + Path.GetDirectoryName(path), ToolTipIcon.Info); } catch { } }
+                    if (open) Launch(path);
+                    Invalidate();
+                }
+                AutoFetch();
             });
         });
     }
 
-    string Download(string target, PhoneItem it) {
-        string dir = SaveDir();
-        Directory.CreateDirectory(dir);
-        string name = it.Name ?? "file";
+    static string SafeName(string name) {
+        name = string.IsNullOrEmpty(name) ? "file" : name;
         foreach (char c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
-        string path = Path.Combine(dir, name);
-        for (int n = 2; File.Exists(path); n++)
-            path = Path.Combine(dir, Path.GetFileNameWithoutExtension(name) + " (" + n + ")" + Path.GetExtension(name));
+        return name;
+    }
+
+    // dest == null: a free name in the save folder; otherwise exactly dest (replacing it, the user confirmed).
+    string Download(string target, PhoneItem it, string dest) {
+        string path = dest;
+        if (path == null) {
+            string dir = SaveDir(), name = SafeName(it.Name);
+            Directory.CreateDirectory(dir);
+            path = Path.Combine(dir, name);
+            for (int n = 2; File.Exists(path); n++)
+                path = Path.Combine(dir, Path.GetFileNameWithoutExtension(name) + " (" + n + ")" + Path.GetExtension(name));
+        }
         string part = path + ".part";
         var r = Request(target, "/f/" + it.Id, "GET");
         r.Timeout = 15000;
@@ -476,6 +516,7 @@ class Portal : Form {
                     }
                 }
             }
+            if (File.Exists(path)) File.Delete(path);
             File.Move(part, path);
         } catch { try { File.Delete(part); } catch { } throw; }
         return path;
@@ -660,7 +701,10 @@ class Portal : Form {
             SendText((string)e.Data.GetData(DataFormats.UnicodeText));
         }
     }
+    static readonly Rectangle GearRect = new Rectangle(152, 14, 26, 26);
+
     protected override void OnMouseClick(MouseEventArgs e) {
+        if (GearRect.Contains(e.Location)) { ShowSettings(); return; }
         int row = RowAt(e.Location);
         if (e.Button == MouseButtons.Right) {
             if (row >= 0 && phone != null) RowMenu(items[row], e.Location);
@@ -671,11 +715,13 @@ class Portal : Form {
         if (row >= 0) { OpenItem(items[row]); return; }
         if (e.Y < BaseH) { try { Process.Start("http://" + phone + "/"); } catch { } }
     }
+    bool gearHot;
     protected override void OnMouseMove(MouseEventArgs e) {
         int row = RowAt(e.Location);
-        if (row != hoverRow) { hoverRow = row; Invalidate(); }
+        bool g = GearRect.Contains(e.Location);
+        if (row != hoverRow || g != gearHot) { hoverRow = row; gearHot = g; Invalidate(); }
     }
-    protected override void OnMouseLeave(EventArgs e) { if (hoverRow != -1) { hoverRow = -1; Invalidate(); } }
+    protected override void OnMouseLeave(EventArgs e) { if (hoverRow != -1 || gearHot) { hoverRow = -1; gearHot = false; Invalidate(); } }
 
     void SetStatus(string s) { status = s; Invalidate(); }
 
@@ -693,6 +739,11 @@ class Portal : Form {
             g.DrawLine(pen, cx - 22, 94, cx + 22, 94);
         }
         var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        // Settings gear, top right
+        if (gearHot) using (var hb = new SolidBrush(Color.FromArgb(60, 255, 255, 255))) g.FillEllipse(hb, GearRect);
+        using (var gf = new Font("Segoe UI Symbol", 12))
+        using (var gb = new SolidBrush(Color.FromArgb(gearHot ? 255 : 190, 255, 255, 255)))
+            g.DrawString("⚙", gf, gb, GearRect, center);
         using (var big = new Font("Segoe UI", 12, FontStyle.Bold))
         using (var small = new Font("Segoe UI", 9))
         using (var dim = new SolidBrush(Color.FromArgb(170, 255, 255, 255))) {
@@ -705,14 +756,16 @@ class Portal : Form {
                 var left = new StringFormat { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
                 var right = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center };
                 string more = items.Count > rows ? "  (+" + (items.Count - rows) + " more on page)" : "";
-                g.DrawString("From phone" + more, small, dim, new RectangleF(14, BaseH, Width - 28, 20), left);
+                g.DrawString("From phone → " + FolderName(SaveDir()) + more, small, dim, new RectangleF(14, BaseH, Width - 28, 20), left);
                 for (int i = 0; i < rows; i++) {
                     var it = items[i];
                     var rc = new Rectangle(8, BaseH + 22 + i * RowH, Width - 16, RowH - 4);
                     using (var bg = new SolidBrush(i == hoverRow ? Color.FromArgb(31, 111, 235) : Color.FromArgb(38, 43, 52)))
                     using (var p = Rounded(rc, 8)) g.FillPath(bg, p);
                     string label = it.Text != null ? "“" + it.Text.Replace("\r", " ").Replace("\n", " ") + "”" : it.Name;
-                    string action = it.Text != null ? "Copy" : "Open";
+                    string have;
+                    bool saved = it.Text == null && fetched.TryGetValue(phone + "/" + Key(it), out have) && File.Exists(have);
+                    string action = it.Text != null ? "Copy" : saved ? "Open ✓" : Prefs.AskEachTime ? "Save" : "Open";
                     g.DrawString(label, small, Brushes.White, new RectangleF(rc.X + 8, rc.Y, rc.Width - 52, rc.Height), left);
                     g.DrawString(action, small, i == hoverRow ? Brushes.White : dim, new RectangleF(rc.X, rc.Y, rc.Width - 8, rc.Height), right);
                 }
@@ -746,15 +799,213 @@ class Portal : Form {
         } catch { return SystemIcons.Application; }
     }
 
-    static bool GetStartup() {
+    internal static bool GetStartup() {
         try { using (var k = Registry.CurrentUser.OpenSubKey(RunKey)) return k != null && k.GetValue("DropPortal") != null; } catch { return false; }
     }
-    static void SetStartup(bool on) {
+    internal static void SetStartup(bool on) {
         try {
             using (var k = Registry.CurrentUser.CreateSubKey(RunKey)) {
                 if (on) k.SetValue("DropPortal", "\"" + Application.ExecutablePath + "\"");
                 else k.DeleteValue("DropPortal", false);
             }
         } catch { }
+    }
+}
+
+// ---- saved preferences (HKCU\Software\DropPortal) ----
+static class Prefs {
+    const string Key = @"Software\DropPortal";
+    public static string DefaultDir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "Drop"); } }
+    public static string SaveDir {
+        get { var s = Str("saveDir"); return string.IsNullOrEmpty(s) ? DefaultDir : s; }
+        set { Set("saveDir", value ?? ""); }
+    }
+    public static bool AskEachTime { get { return Int("askEach") == 1; } set { Set("askEach", value ? 1 : 0); } }
+    public static bool AutoSave { get { return Int("autoSave") == 1; } set { Set("autoSave", value ? 1 : 0); } }
+
+    static string Str(string n) { try { using (var k = Registry.CurrentUser.OpenSubKey(Key)) return k == null ? null : k.GetValue(n) as string; } catch { return null; } }
+    static int Int(string n) { try { using (var k = Registry.CurrentUser.OpenSubKey(Key)) return k == null ? 0 : Convert.ToInt32(k.GetValue(n, 0)); } catch { return 0; } }
+    static void Set(string n, object v) { try { using (var k = Registry.CurrentUser.CreateSubKey(Key)) k.SetValue(n, v); } catch { } }
+}
+
+// ---- look shared by the settings window: same dark card, blue accent and Segoe UI as the panel ----
+static class Look {
+    public static readonly Color Bg = Color.FromArgb(24, 27, 33), Card = Color.FromArgb(38, 43, 52), Line = Color.FromArgb(60, 66, 78),
+        Accent = Color.FromArgb(31, 111, 235), Text = Color.White, Dim = Color.FromArgb(170, 180, 190);
+
+    public static GraphicsPath Round(RectangleF r, float d) {
+        var p = new GraphicsPath();
+        p.AddArc(r.X, r.Y, d, d, 180, 90);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+}
+
+/** Rounded button: filled blue, or outlined. */
+class Pill : Control {
+    public bool Filled;
+    bool hover;
+    public Pill(string text, bool filled) {
+        Text = text; Filled = filled;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+        BackColor = Look.Bg;
+        Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+        Cursor = Cursors.Hand;
+        Height = 34;
+        Width = TextRenderer.MeasureText(text, Font).Width + 32;
+    }
+    protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); }
+    protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); }
+    protected override void OnPaint(PaintEventArgs e) {
+        var g = e.Graphics;
+        g.Clear(BackColor);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var p = Look.Round(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), Height - 2)) {
+            if (Filled) { using (var b = new SolidBrush(hover ? Color.FromArgb(56, 132, 245) : Look.Accent)) g.FillPath(b, p); }
+            else {
+                if (hover) using (var b = new SolidBrush(Look.Card)) g.FillPath(b, p);
+                using (var pen = new Pen(Look.Line)) g.DrawPath(pen, p);
+            }
+        }
+        TextRenderer.DrawText(g, Text, Font, ClientRectangle, Look.Text, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+    }
+}
+
+/** On/off switch with a title and a smaller explanation. */
+class Toggle : Control {
+    bool on;
+    public string Hint;
+    public event EventHandler Changed;
+    public bool Checked { get { return on; } set { on = value; Invalidate(); } }
+    public Toggle(string title, string hint, bool value) {
+        Text = title; Hint = hint; on = value;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+        BackColor = Look.Bg;
+        Cursor = Cursors.Hand;
+        Height = hint == null ? 30 : 46;
+    }
+    protected override void OnClick(EventArgs e) { on = !on; Invalidate(); if (Changed != null) Changed(this, e); }
+    protected override void OnPaint(PaintEventArgs e) {
+        var g = e.Graphics;
+        g.Clear(BackColor);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var f = new Font("Segoe UI", 10))
+        using (var small = new Font("Segoe UI", 8.5f)) {
+            TextRenderer.DrawText(g, Text, f, new Rectangle(0, 2, Width - 60, 22), Look.Text, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            if (Hint != null) TextRenderer.DrawText(g, Hint, small, new Rectangle(0, 24, Width - 60, 20), Look.Dim, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+        }
+        var track = new RectangleF(Width - 46, 4, 42, 22);
+        using (var p = Look.Round(track, 22))
+        using (var b = new SolidBrush(on ? Look.Accent : Look.Line)) g.FillPath(b, p);
+        float x = on ? track.Right - 19 : track.X + 3;
+        g.FillEllipse(Brushes.White, x, track.Y + 3, 16, 16);
+    }
+}
+
+/** Settings: where files from the phone are saved, and how. */
+class SettingsWindow : Form {
+    readonly Label pathLabel;
+    Point dragFrom;
+
+    public SettingsWindow(MethodInvoker checkUpdates) {
+        Text = "Drop settings";
+        FormBorderStyle = FormBorderStyle.None;
+        StartPosition = FormStartPosition.CenterScreen;
+        ShowInTaskbar = true;
+        TopMost = true;
+        BackColor = Look.Bg;
+        ForeColor = Look.Text;
+        Font = new Font("Segoe UI", 9.5f);
+        ClientSize = new Size(420, 450);
+        DoubleBuffered = true;
+        KeyPreview = true;
+        KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) Close(); };
+        using (var p = Look.Round(new RectangleF(0, 0, Width, Height), 22)) Region = new Region(p);
+
+        // Title (drag the window by its background) and a close button
+        var title = new Label { Text = "Settings", Font = new Font("Segoe UI", 14, FontStyle.Bold), ForeColor = Look.Text, AutoSize = true, Location = new Point(22, 18), BackColor = Look.Bg };
+        var close = new Label { Text = "✕", Font = new Font("Segoe UI", 11), ForeColor = Look.Dim, AutoSize = false, Size = new Size(32, 32), Location = new Point(ClientSize.Width - 46, 14), TextAlign = ContentAlignment.MiddleCenter, Cursor = Cursors.Hand, BackColor = Look.Bg };
+        close.Click += delegate { Close(); };
+        close.MouseEnter += delegate { close.ForeColor = Look.Text; };
+        close.MouseLeave += delegate { close.ForeColor = Look.Dim; };
+        MouseDown += delegate(object s, MouseEventArgs e) { dragFrom = e.Location; };
+        MouseMove += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Left) Location = new Point(Location.X + e.X - dragFrom.X, Location.Y + e.Y - dragFrom.Y); };
+        Controls.Add(title);
+        Controls.Add(close);
+
+        int x = 22, w = ClientSize.Width - 44, y = 68;
+
+        // Save folder
+        Controls.Add(Section("FILES FROM YOUR PHONE ARE SAVED TO", x, y));
+        y += 24;
+        pathLabel = new Label {
+            Location = new Point(x, y), Size = new Size(w, 40), AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(12, 0, 12, 0), ForeColor = Look.Text, BackColor = Look.Card, Font = new Font("Segoe UI", 9.5f), Cursor = Cursors.Hand
+        };
+        using (var r = Look.Round(new RectangleF(0, 0, w, 40), 14)) pathLabel.Region = new Region(r);
+        pathLabel.Click += delegate { ChangeFolder(); };
+        Controls.Add(pathLabel);
+        ShowPath();
+        y += 50;
+
+        var change = new Pill("Change folder…", true) { Location = new Point(x, y) };
+        change.Click += delegate { ChangeFolder(); };
+        var open = new Pill("Open folder", false) { Location = new Point(change.Right + 8, y) };
+        open.Click += delegate { try { Directory.CreateDirectory(Prefs.SaveDir); Process.Start("explorer.exe", "\"" + Prefs.SaveDir + "\""); } catch { } };
+        var reset = new Pill("Default", false) { Location = new Point(open.Right + 8, y) };
+        reset.Click += delegate { Prefs.SaveDir = null; ShowPath(); };
+        Controls.Add(change); Controls.Add(open); Controls.Add(reset);
+        y += 54;
+
+        // How files are saved
+        Controls.Add(Section("WHEN THE PHONE SENDS A FILE", x, y));
+        y += 26;
+        var ask = new Toggle("Ask where to save each file", "Pick the folder and name every time you open one", Prefs.AskEachTime) { Location = new Point(x, y), Width = w };
+        ask.Changed += delegate { Prefs.AskEachTime = ask.Checked; };
+        Controls.Add(ask);
+        y += 54;
+        var auto = new Toggle("Save files automatically", "Download new files to the folder above right away", Prefs.AutoSave) { Location = new Point(x, y), Width = w };
+        auto.Changed += delegate { Prefs.AutoSave = auto.Checked; };
+        Controls.Add(auto);
+        y += 62;
+
+        // General
+        Controls.Add(Section("GENERAL", x, y));
+        y += 26;
+        var startup = new Toggle("Start with Windows", null, Portal.GetStartup()) { Location = new Point(x, y), Width = w };
+        startup.Changed += delegate { Portal.SetStartup(startup.Checked); };
+        Controls.Add(startup);
+
+        // Footer: version + update check, Done
+        string ver = BuildInfo.Version > 0 ? "Drop Portal v" + BuildInfo.Version : "Drop Portal (local build)";
+        var verLabel = new Label { Text = ver + " · Check for updates", ForeColor = Look.Dim, AutoSize = true, Location = new Point(x, ClientSize.Height - 40), Cursor = Cursors.Hand, BackColor = Look.Bg };
+        verLabel.Click += delegate { checkUpdates(); };
+        var done = new Pill("Done", true);
+        done.Location = new Point(ClientSize.Width - x - done.Width, ClientSize.Height - 50);
+        done.Click += delegate { Close(); };
+        Controls.Add(verLabel);
+        Controls.Add(done);
+    }
+
+    static Label Section(string text, int x, int y) {
+        return new Label { Text = text, Font = new Font("Segoe UI", 8, FontStyle.Bold), ForeColor = Color.FromArgb(140, 150, 165), AutoSize = true, Location = new Point(x, y), BackColor = Look.Bg };
+    }
+
+    void ShowPath() { pathLabel.Text = Prefs.SaveDir; }
+
+    void ChangeFolder() {
+        using (var d = new FolderBrowserDialog { Description = "Where should files from your phone be saved?", SelectedPath = Prefs.SaveDir, ShowNewFolderButton = true }) {
+            if (d.ShowDialog(this) != DialogResult.OK) return;
+            Prefs.SaveDir = d.SelectedPath;
+            ShowPath();
+        }
+    }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var pen = new Pen(Look.Line, 2)) using (var r = Look.Round(new RectangleF(1, 1, Width - 3, Height - 3), 22)) e.Graphics.DrawPath(pen, r);
     }
 }
