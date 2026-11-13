@@ -33,18 +33,27 @@ class Updater {
                 if (!repo.matches("[\\w.-]+/[\\w.-]+")) return;
                 long current = a.getPackageManager().getPackageInfo(a.getPackageName(), 0).getLongVersionCode();
 
-                JSONObject rel;
-                try (InputStream in = get("https://api.github.com/repos/" + repo + "/releases/latest")) {
-                    rel = new JSONObject(new String(read(in), "UTF-8"));
+                // A release may carry only the Windows portal, so find the newest one that has an APK.
+                JSONArray rels;
+                try (InputStream in = get("https://api.github.com/repos/" + repo + "/releases?per_page=20")) {
+                    rels = new JSONArray(new String(read(in), "UTF-8"));
                 }
-                final int latest = Integer.parseInt(rel.getString("tag_name").replaceAll("\\D", ""));
-                if (latest <= current) return;
+                int best = 0;
                 String url = null;
-                JSONArray assets = rel.getJSONArray("assets");
-                for (int i = 0; i < assets.length(); i++) {
-                    JSONObject as = assets.getJSONObject(i);
-                    if (as.getString("name").endsWith(".apk")) url = as.getString("browser_download_url");
+                for (int r = 0; r < rels.length(); r++) {
+                    JSONObject rel = rels.getJSONObject(r);
+                    if (rel.optBoolean("draft") || rel.optBoolean("prerelease")) continue;
+                    int v;
+                    try { v = Integer.parseInt(rel.getString("tag_name").replaceAll("\\D", "")); } catch (NumberFormatException e) { continue; }
+                    if (v <= best) continue;
+                    JSONArray assets = rel.getJSONArray("assets");
+                    for (int i = 0; i < assets.length(); i++) {
+                        JSONObject as = assets.getJSONObject(i);
+                        if (as.getString("name").endsWith(".apk")) { best = v; url = as.getString("browser_download_url"); }
+                    }
                 }
+                final int latest = best;
+                if (latest <= current) return;
                 if (url == null || !url.startsWith("https://github.com/" + repo + "/")) return;
 
                 final File apk = new File(a.getCacheDir(), "update-" + latest + ".apk");

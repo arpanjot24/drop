@@ -48,7 +48,7 @@ import org.json.JSONObject;
 public class MainActivity extends Activity implements Server.Host {
     private static Server server;
     /** One row in the activity list. Received rows (in=true) survive restarts. */
-    static class Entry { boolean in; String label, uri, mime, text; }
+    static class Entry { boolean in; String label, uri, mime, text; int sid; }  // sid: server item id of a shared row
     private static final ArrayList<Entry> entries = new ArrayList<Entry>();
     private static boolean loaded, updateChecked;
     private static final Set<String> allowed = Collections.synchronizedSet(new HashSet<String>());
@@ -180,14 +180,14 @@ public class MainActivity extends Activity implements Server.Host {
         } catch (Exception e) { }
         if (it.name == null) it.name = "file";
         server.add(it);
-        add(false, "↑ " + it.name, null, null, null);
+        add(false, "↑ " + it.name, null, null, null).sid = it.id;
     }
 
     private void shareText(String t) {
         Server.Item it = new Server.Item();
         it.text = t;
         server.add(it);
-        add(false, "↑ " + t, null, null, null);
+        add(false, "↑ " + t, null, null, null).sid = it.id;
     }
 
     // ---- Server.Host (called on server threads) ----
@@ -252,6 +252,14 @@ public class MainActivity extends Activity implements Server.Host {
 
     public void onFile(String name) { }  // the row is added in save(), where the file's Uri is known
 
+    /** A computer deleted a shared item: drop its row. The original file on the phone is left alone. */
+    public void onRemoved(final int id) {
+        main.post(new Runnable() { public void run() {
+            for (int i = entries.size() - 1; i >= 0; i--) if (!entries.get(i).in && entries.get(i).sid == id) entries.remove(i);
+            render();
+        } });
+    }
+
     public void onText(final String text) {
         main.post(new Runnable() { public void run() {
             ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Drop", text));
@@ -301,7 +309,7 @@ public class MainActivity extends Activity implements Server.Host {
         return b;
     }
 
-    private void add(boolean in, String label, String uri, String mime, String text) {
+    private Entry add(boolean in, String label, String uri, String mime, String text) {
         Entry e = new Entry();
         e.in = in; e.label = label.length() > 300 ? label.substring(0, 300) + "…" : label;
         e.uri = uri; e.mime = mime; e.text = text;
@@ -309,6 +317,7 @@ public class MainActivity extends Activity implements Server.Host {
         while (entries.size() > 50) entries.remove(entries.size() - 1);
         if (in) persist();
         render();
+        return e;
     }
 
     /** Received files and text get Open / Share / Copy right here, so there is no trip to the file manager. */

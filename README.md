@@ -15,12 +15,30 @@ The phone runs a tiny web server; the computer just opens the address shown in t
 is open, shows a drop target on the right edge of the screen. Drag files or text onto it to send them;
 click it to open the full page. It adds itself to Windows startup on first run (toggle in the tray menu).
 
-    mcs -target:winexe -r:System.Windows.Forms.dll -r:System.Drawing.dll -out:DropPortal.exe pc/DropPortal.cs
+Build it on Windows with the C# compiler that ships with .NET Framework (an exe built with Mono's `mcs`
+crashes on Windows .NET):
+
+    C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /codepage:65001 /target:winexe /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll /r:Microsoft.VisualBasic.dll /out:pc\DropPortal.exe pc\DropPortal.cs pc\BuildInfo.cs
+
+Files and text you send from the phone ("Send files" / "Send clipboard") appear as rows under the drop
+target; click a file to save it and open it, or click text to copy it. Right-click a row to ignore it
+(hide it on this PC) or delete it (PC copy to the Recycle Bin, and removed from Drop's list on the phone;
+the original file on the phone is never touched). Files are saved to `Downloads\Drop` by default; change
+it with "Save received files to…" in the tray menu.
+
+It finds the phone by broadcast, and also probes each address on the local network directly, since many
+routers drop broadcasts.
 
 ## Releasing an update
 
-Push to `main`. The workflow in `.github/workflows/release.yml` builds, signs and publishes `Drop.apk`
-as release `v<number>`; phones pick it up the next time Drop is opened.
+Push to `main`. The workflow in `.github/workflows/release.yml` publishes release `v<number>` with only
+the parts that changed since the last release:
+
+- `Drop.apk` when the Android app changed: phones offer the update the next time Drop is opened.
+- `DropPortal.exe` when anything in `pc/` changed: the portal offers to update itself (it checks shortly
+  after starting and every 6 hours, or use "Check for updates" in the tray menu).
+
+A push that changes neither publishes nothing. Run the workflow by hand with "force" to publish both.
 
 One-time setup: add a repository secret `KEYSTORE_B64` with the output of `base64 -w0 drop.keystore`,
 and keep the repository public (the app downloads releases without signing in).

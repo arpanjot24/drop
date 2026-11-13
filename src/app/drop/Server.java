@@ -26,6 +26,8 @@ public class Server {
         int allowed(String ip);
         void onFile(String name);
         void onText(String text);
+        /** A computer removed shared item id from the list. */
+        void onRemoved(int id);
     }
 
     public static class Item {
@@ -76,6 +78,9 @@ public class Server {
 
     public void add(Item it) { synchronized (items) { it.id = nextId++; items.add(0, it); } }
     public void clear() { synchronized (items) { items.clear(); } }
+    public boolean remove(String id) {
+        synchronized (items) { Item it = find(id); return it != null && items.remove(it); }
+    }
 
     private void acceptLoop() {
         while (true) {
@@ -153,6 +158,12 @@ public class Server {
             String saved = host.save(name, in, len);
             host.onFile(saved);
             send(out, "200 OK", "text/plain; charset=utf-8", saved.getBytes("UTF-8"));
+        } else if (method.equals("POST") && target.equals("/remove")) {
+            String id = "";
+            for (String kv : query.split("&")) if (kv.startsWith("id=")) id = kv.substring(3);
+            if (!remove(id)) { send(out, "404 Not Found", "text/plain", "gone".getBytes("UTF-8")); return; }
+            host.onRemoved(Integer.parseInt(id));
+            send(out, "200 OK", "text/plain", "ok".getBytes("UTF-8"));
         } else if (method.equals("POST") && target.equals("/text")) {
             if (len > (1 << 20)) { send(out, "413 Too Large", "text/plain", "too long".getBytes("UTF-8")); return; }
             byte[] b = new byte[(int) len];

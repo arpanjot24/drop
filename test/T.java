@@ -11,6 +11,7 @@ public class T implements Server.Host {
     public int allowed(String ip) { return new File("build/t/allow").exists() ? 1 : 0; }
     public void onFile(String n) { System.out.println("FILE " + n); }
     public void onText(String t) { System.out.println("TEXT " + t); }
+    public void onRemoved(int id) { System.out.println("REMOVED " + id); }
     public static void main(String[] a) throws Exception {
         Server s = new Server(); s.host = new T(); s.start(8080);
         Server.Item f = new Server.Item(); f.name = "from phone é.bin"; f.uri = "build/t/phone.bin"; f.size = new File(f.uri).length(); s.add(f);

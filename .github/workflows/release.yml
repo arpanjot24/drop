@@ -1,5 +1,7 @@
-# Every push to main builds a signed APK and publishes it as a GitHub Release.
-# Installed copies of Drop check the latest release on launch and offer to update.
+# Every push to main publishes a GitHub Release v<number> with whatever changed since the last release:
+#   - Drop.apk        when the Android app changed   -> phones offer the update next time Drop opens
+#   - DropPortal.exe  when the Windows portal changed -> the portal offers the update (checks every 6 hours)
+# A push that changes neither (e.g. only the README) publishes nothing, so nobody is prompted.
 #
 # One-time setup: add a repository secret named KEYSTORE_B64 containing `base64 -w0 drop.keystore`.
 # The key must stay the same forever, or phones will refuse the update.
@@ -8,15 +10,46 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Build and publish both the app and the portal"
+        type: boolean
+        default: false
 permissions:
   contents: write
 jobs:
-  release:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      android: ${{ steps.c.outputs.android }}
+      pc: ${{ steps.c.outputs.pc }}
+      version: ${{ steps.c.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: c
+        run: |
+          echo "version=$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_OUTPUT"
+          prev=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          if [ -z "$prev" ] || [ "${{ inputs.force }}" = "true" ]; then
+            android=true; pc=true
+          else
+            git diff --quiet "$prev" HEAD -- src res assets AndroidManifest.xml build.sh && android=false || android=true
+            git diff --quiet "$prev" HEAD -- pc && pc=false || pc=true
+          fi
+          echo "Since ${prev:-the start}: android=$android pc=$pc"
+          echo "android=$android" >> "$GITHUB_OUTPUT"
+          echo "pc=$pc" >> "$GITHUB_OUTPUT"
+
+  android:
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y aapt apksigner zipalign dalvik-exchange mono-mcs libmono-system-windows-forms4.0-cil
+        run: sudo apt-get update && sudo apt-get install -y aapt apksigner zipalign dalvik-exchange
       - name: Fetch Android framework jar
         run: curl -fsSL -o android.jar https://repo1.maven.org/maven2/org/robolectric/android-all/14-robolectric-10818077/android-all-14-robolectric-10818077.jar
       - name: Restore signing key
@@ -28,10 +61,52 @@ jobs:
       - name: Build
         run: |
           echo "$GITHUB_REPOSITORY" > assets/repo.txt
-          echo "VERSION_CODE=$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_ENV"
-          VERSION_CODE=$((GITHUB_RUN_NUMBER + 100)) ./build.sh
-          mcs -target:winexe -optimize -r:System.Windows.Forms.dll -r:System.Drawing.dll -out:DropPortal.exe pc/DropPortal.cs
+          VERSION_CODE=${{ needs.changes.outputs.version }} ./build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: Drop.apk
+
+  portal:
+    needs: changes
+    if: needs.changes.outputs.pc == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (Windows csc; Mono's mcs output crashes on Windows .NET)
+        shell: pwsh
+        run: |
+          @"
+          static class BuildInfo {
+              public const int Version = ${{ needs.changes.outputs.version }};
+              public const string Repo = "$env:GITHUB_REPOSITORY";
+          }
+          "@ | Set-Content -Encoding utf8 pc/BuildInfo.cs
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /optimize /codepage:65001 /target:winexe `
+            /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll /r:Microsoft.VisualBasic.dll `
+            /out:DropPortal.exe pc/DropPortal.cs pc/BuildInfo.cs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portal
+          path: DropPortal.exe
+
+  release:
+    needs: [changes, android, portal]
+    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && (needs.changes.outputs.android == 'true' || needs.changes.outputs.pc == 'true')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "v$VERSION_CODE" Drop.apk DropPortal.exe --title "Drop v$VERSION_CODE" --generate-notes
+        run: |
+          v=v${{ needs.changes.outputs.version }}
+          parts=""
+          [ -f out/Drop.apk ] && parts="$parts Android app"
+          [ -f out/DropPortal.exe ] && parts="${parts:+$parts,} Windows portal"
+          gh release create "$v" out/* --title "Drop $v" --notes "Updated:$parts" --generate-notes
