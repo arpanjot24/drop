@@ -19,9 +19,32 @@ using Microsoft.Win32;
 static class Program {
     [STAThread]
     static void Main(string[] args) {
+        // Never die silently: show what went wrong and keep a copy in %LOCALAPPDATA%\DropPortal\error.txt
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e) { Fail(e.Exception); };
+        AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e) { Fail(e.ExceptionObject as Exception); };
+        try { Run(args); } catch (Exception e) { Fail(e); }
+    }
+
+    static void Fail(Exception e) {
+        string text = "Drop Portal stopped because of an error:\r\n\r\n" + e;
+        try {
+            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DropPortal");
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, "error.txt"), text);
+            text += "\r\n\r\n(Saved to " + Path.Combine(dir, "error.txt") + ")";
+        } catch { }
+        MessageBox.Show(text, "Drop Portal", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        Environment.Exit(1);
+    }
+
+    static void Run(string[] args) {
         bool first;
         using (new Mutex(true, "DropPortal-single-instance", out first)) {
-            if (!first) return;
+            if (!first) {
+                MessageBox.Show("Drop Portal is already running. Look for the blue icon by the clock (click the ^ arrow).", "Drop Portal");
+                return;
+            }
             Application.EnableVisualStyles();
             Application.Run(new Portal(args));
         }
@@ -81,6 +104,20 @@ class Portal : Form {
         timer.Tick += delegate { Tick(); };
         timer.Start();
         Tick();
+
+        // Show the panel for a few seconds on launch so it is obvious the app is running.
+        SetStatus("Open Drop on your phone");
+        Place();
+        allowShow = true;
+        Show();
+        var intro = new System.Windows.Forms.Timer { Interval = 8000 };
+        intro.Tick += delegate { intro.Stop(); if (phone == null) Hide(); };
+        intro.Start();
+    }
+
+    void Place() {
+        var wa = Screen.PrimaryScreen.WorkingArea;
+        Location = new Point(wa.Right - Width - 12, wa.Top + (wa.Height - Height) / 2);
     }
 
     // ---- stay hidden until a phone is found; never steal keyboard focus ----
@@ -142,8 +179,7 @@ class Portal : Form {
         if (!ip.Equals(lastIp)) { lastIp = ip; try { Registry.CurrentUser.CreateSubKey(AppKey).SetValue("lastIp", ip.ToString()); } catch { } }
         tray.Text = "Drop: connected to " + ip;
         SetStatus("Connecting…");
-        var wa = Screen.PrimaryScreen.WorkingArea;
-        Location = new Point(wa.Right - Width - 12, wa.Top + (wa.Height - Height) / 2);
+        Place();
         allowShow = true;
         Show();
         CheckApproval();
