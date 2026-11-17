@@ -13,7 +13,12 @@ import java.net.Socket;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.zip.Deflater;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /** Tiny HTTP server. No Android imports, so it can be tested on a plain JVM. */
 public class Server {
@@ -28,6 +33,8 @@ public class Server {
         void onText(String text);
         /** A computer removed shared item id from the list. */
         void onRemoved(int id);
+        /** Route this socket over Wi-Fi even when Wi-Fi has no internet and mobile data is the default network. */
+        void bindToWifi(DatagramSocket s);
     }
 
     public static class Item {
@@ -66,6 +73,7 @@ public class Server {
                 ds.receive(p);
                 if (!new String(p.getData(), 0, p.getLength(), "UTF-8").equals("DROP?")) continue;
                 byte[] r = ("DROP!" + port).getBytes("UTF-8");
+                host.bindToWifi(ds);
                 ds.send(new DatagramPacket(r, r.length, p.getAddress(), p.getPort()));
             } catch (IOException e) { if (ds.isClosed()) return; }
         }
@@ -150,6 +158,33 @@ public class Server {
                 while ((n = f.read(buf)) > 0) out.write(buf, 0, n);
                 out.flush();
             } finally { f.close(); }
+        } else if (method.equals("GET") && target.equals("/all.zip")) {
+            List<Item> files = new ArrayList<Item>();
+            synchronized (items) { for (Item it : items) if (it.uri != null) files.add(it); }
+            out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\n"
+                + "Content-Disposition: attachment; filename=\"Drop.zip\"\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
+            ZipOutputStream z = new ZipOutputStream(out);
+            z.setLevel(Deflater.NO_COMPRESSION);      // photos and videos are already compressed; keep it fast
+            Set<String> used = new HashSet<String>();
+            byte[] buf = new byte[1 << 16];
+            for (int k = files.size() - 1; k >= 0; k--) {   // oldest first
+                Item it = files.get(k);
+                String name = it.name;
+                for (int n = 2; !used.add(name); n++) {
+                    int dot = it.name.lastIndexOf('.');
+                    name = dot > 0 ? it.name.substring(0, dot) + " (" + n + ")" + it.name.substring(dot) : it.name + " (" + n + ")";
+                }
+                InputStream f;
+                try { f = host.open(it); } catch (IOException e) { continue; }   // file deleted on the phone: skip it
+                try {
+                    z.putNextEntry(new ZipEntry(name));
+                    int n;
+                    while ((n = f.read(buf)) > 0) z.write(buf, 0, n);
+                    z.closeEntry();
+                } finally { f.close(); }
+            }
+            z.finish();
+            out.flush();
         } else if (method.equals("PUT") && target.equals("/up")) {
             String name = "file";
             for (String kv : query.split("&")) if (kv.startsWith("name=")) name = URLDecoder.decode(kv.substring(5), "UTF-8");

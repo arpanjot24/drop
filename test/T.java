@@ -10,6 +10,7 @@ public class T implements Server.Host {
     public InputStream open(Server.Item it) throws IOException { return new FileInputStream(it.uri); }
     public int allowed(String ip) { return new File("build/t/allow").exists() ? 1 : 0; }
     public void onFile(String n) { System.out.println("FILE " + n); }
+    public void bindToWifi(java.net.DatagramSocket s) { }
     public void onText(String t) { System.out.println("TEXT " + t); }
     public void onRemoved(int id) { System.out.println("REMOVED " + id); }
     public static void main(String[] a) throws Exception {

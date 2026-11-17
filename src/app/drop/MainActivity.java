@@ -18,6 +18,11 @@ import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.net.ConnectivityManager;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -42,6 +47,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.DatagramSocket;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
@@ -120,17 +126,20 @@ public class MainActivity extends Activity implements Server.Host {
 
         // Main actions
         LinearLayout btns = row();
-        btns.addView(pill("Send files", true, new View.OnClickListener() { public void onClick(View v) {
+        btns.addView(pill("Send photos", true, new View.OnClickListener() { public void onClick(View v) { pickPhotos(); } }), weighted(0));
+        btns.addView(pill("Send files", false, new View.OnClickListener() { public void onClick(View v) {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
             i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
             startActivityForResult(i, 1);
-        } }), weighted(0));
-        btns.addView(pill("Send clipboard", false, new View.OnClickListener() { public void onClick(View v) {
+        } }), weighted(12));
+        root.addView(btns, margins(-1, 16));
+        LinearLayout btns2 = row();
+        btns2.addView(pill("Send clipboard", false, new View.OnClickListener() { public void onClick(View v) {
             ClipData c = ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).getPrimaryClip();
             CharSequence t = c != null && c.getItemCount() > 0 ? c.getItemAt(0).coerceToText(MainActivity.this) : null;
             if (t == null || t.length() == 0) toast("Clipboard is empty"); else shareText(t.toString());
-        } }), weighted(12));
-        root.addView(btns, margins(-1, 16));
+        } }), weighted(0));
+        root.addView(btns2, margins(-1, 12));
 
         // Activity list
         LinearLayout sec = row();
@@ -200,6 +209,22 @@ public class MainActivity extends Activity implements Server.Host {
     @Override protected void onDestroy() {
         super.onDestroy();
         if (isFinishing() && server != null) { server.stop(); server = null; }
+    }
+
+    /**
+     * Gallery-style picker: tap as many photos/videos as you like, with an Albums tab that includes
+     * WhatsApp Images. Falls back to the gallery app's own picker on phones without the system one.
+     */
+    private void pickPhotos() {
+        Intent i = new Intent(MediaStore.ACTION_PICK_IMAGES);
+        if (Build.VERSION.SDK_INT >= 33 && i.resolveActivity(getPackageManager()) != null) {
+            i.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, MediaStore.getPickImagesMaxLimit());
+        } else {
+            i = new Intent(Intent.ACTION_GET_CONTENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE);
+            i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "image/*", "video/*" });
+            i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        }
+        try { startActivityForResult(i, 1); } catch (ActivityNotFoundException e) { toast("No photo picker on this phone; use Send files"); }
     }
 
     @Override protected void onActivityResult(int req, int res, Intent d) {
@@ -356,16 +381,40 @@ public class MainActivity extends Activity implements Server.Host {
             .show();
     }
 
+    /** The Wi-Fi network, even if Android has marked it "no internet" and made mobile data the default. */
+    private Network wifi() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            for (Network n : cm.getAllNetworks()) {
+                NetworkCapabilities c = cm.getNetworkCapabilities(n);
+                if (c != null && (c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || c.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))) return n;
+            }
+        } catch (Exception e) { }
+        return null;
+    }
+
+    public void bindToWifi(DatagramSocket s) {
+        Network n = wifi();
+        if (n != null) try { n.bindSocket(s); } catch (Exception e) { }
+    }
+
     private void showUrl() {
         if (server == null) return;
         String ip = null;
-        try {
+        Network n = wifi();
+        if (n != null) {
+            LinkProperties lp = ((ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE)).getLinkProperties(n);
+            if (lp != null) for (LinkAddress la : lp.getLinkAddresses())
+                if (la.getAddress() instanceof Inet4Address) ip = la.getAddress().getHostAddress();
+        }
+        // Phone used as a hotspot: the PC joins the phone's own network, no router or internet needed.
+        if (ip == null) try {
             for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
                 if (!ni.isUp() || ni.isLoopback()) continue;
                 for (InetAddress a : Collections.list(ni.getInetAddresses())) {
-                    if (a instanceof Inet4Address && a.isSiteLocalAddress()) {
-                        if (ip == null || ni.getName().startsWith("wlan")) ip = a.getHostAddress();
-                    }
+                    String nm = ni.getName();
+                    boolean wifiLike = nm.startsWith("wlan") || nm.startsWith("swlan") || nm.startsWith("ap") || nm.startsWith("softap");
+                    if (a instanceof Inet4Address && a.isSiteLocalAddress() && wifiLike) ip = a.getHostAddress();
                 }
             }
         } catch (Exception e) { }

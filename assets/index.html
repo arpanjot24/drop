@@ -19,12 +19,14 @@
   .row small { opacity: .6; white-space: nowrap; }
   .row a { color: var(--accent); }
   .empty { opacity: .5; padding: 10px 0; }
+  #all { float: right; text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--accent); opacity: 1; }
+  h2:has(#all:not([hidden])) { opacity: 1; }
 </style>
 <h1>Drop</h1>
 <div id="zone">Drop files anywhere, or click to choose<input id="pick" type="file" multiple hidden></div>
 <form id="tf"><textarea id="t" rows="1" placeholder="Text or link to send to phone"></textarea><button>Send</button></form>
 <div id="ups"></div>
-<h2>From phone</h2>
+<h2>From phone <a id="all" href="/all.zip" hidden>Download all</a></h2>
 <div id="list"><div class="empty">Nothing yet. Use “Send files” in the app, or share to Drop from any app.</div></div>
 <script>
 const $ = id => document.getElementById(id);
@@ -94,6 +96,7 @@ async function poll() {
         }
         list.append(r);
       }
+      $('all').hidden = items.filter(i => i.text == null).length < 2;
       if (!items.length) list.innerHTML = '<div class="empty">Nothing yet.</div>';
     }
   } catch {}
