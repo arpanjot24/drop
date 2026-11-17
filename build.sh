@@ -15,6 +15,8 @@ dalvik-exchange --dex --min-sdk-version=26 --output=build/classes.dex build/clas
 (cd build && zip -q base.apk classes.dex && zipalign -f 4 base.apk aligned.apk)
 [ -f drop.keystore ] || keytool -genkeypair -keystore drop.keystore -storepass dropdrop -alias drop \
   -keyalg RSA -keysize 2048 -validity 10000 -dname CN=Drop
-apksigner sign --ks drop.keystore --ks-pass pass:dropdrop --out Drop.apk build/aligned.apk
+apksigner sign --ks drop.keystore --ks-pass pass:dropdrop --min-sdk-version 29 \
+  --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --v4-signing-enabled false \
+  --out Drop.apk build/aligned.apk
 apksigner verify --verbose Drop.apk | head -4
 ls -la Drop.apk
