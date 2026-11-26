@@ -8,6 +8,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.SocketTimeoutException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
@@ -47,6 +49,26 @@ public class Server {
     public int port;
     /** UDP port the PC companion probes to find the phone ("DROP?" -> "DROP!<http port>"). */
     public static final int DISCOVERY_PORT = 8079;
+
+    /** Send "DROP?" to `to` and return "ip:port" of every Drop that answers within timeoutMs, except `self`. */
+    public static List<String> probe(DatagramSocket s, InetAddress to, String self, int timeoutMs) throws IOException {
+        List<String> found = new ArrayList<String>();
+        byte[] q = "DROP?".getBytes("UTF-8"), buf = new byte[64];
+        s.setBroadcast(true);
+        s.setSoTimeout(timeoutMs);
+        s.send(new DatagramPacket(q, q.length, to, DISCOVERY_PORT));
+        try {
+            while (true) {
+                DatagramPacket p = new DatagramPacket(buf, buf.length);
+                s.receive(p);
+                String m = new String(p.getData(), 0, p.getLength(), "UTF-8"), ip = p.getAddress().getHostAddress();
+                if (!m.startsWith("DROP!") || ip.equals(self)) continue;
+                String addr = ip + ":" + m.substring(5);
+                if (!found.contains(addr)) found.add(addr);
+            }
+        } catch (SocketTimeoutException done) { }
+        return found;
+    }
     private ServerSocket ss;
     private DatagramSocket ds;
     private final List<Item> items = new ArrayList<Item>();

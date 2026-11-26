@@ -552,8 +552,10 @@ class Portal : Form {
     }
 
     void Found(IPAddress ip, int port) {
-        lastSeen = DateTime.UtcNow;
         string addr = ip + ":" + port;
+        // shortcut: the portal sends to the first phone it finds; with several phones open, close Drop on the others to switch
+        if (phone != null && addr != phone) return;
+        lastSeen = DateTime.UtcNow;
         if (addr == phone) return;
         phone = addr; approved = false;
         if (!ip.Equals(lastIp)) { lastIp = ip; try { Registry.CurrentUser.CreateSubKey(AppKey).SetValue("lastIp", ip.ToString()); } catch { } }

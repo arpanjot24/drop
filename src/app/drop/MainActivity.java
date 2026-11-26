@@ -48,6 +48,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.DatagramSocket;
+import java.util.List;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
@@ -77,7 +78,8 @@ public class MainActivity extends Activity implements Server.Host {
     private LinearLayout listView;
     private int pad;
     private byte[] page;
-    private WifiManager.MulticastLock lock;  // lets the PC companion's broadcast probe reach us
+    private WifiManager.MulticastLock lock;
+    private static String selfIp;  // our own Wi-Fi address, so Nearby devices skips this phone  // lets the PC companion's broadcast probe reach us
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -139,6 +141,7 @@ public class MainActivity extends Activity implements Server.Host {
             CharSequence t = c != null && c.getItemCount() > 0 ? c.getItemAt(0).coerceToText(MainActivity.this) : null;
             if (t == null || t.length() == 0) toast("Clipboard is empty"); else shareText(t.toString());
         } }), weighted(0));
+        btns2.addView(pill("Nearby devices", false, new View.OnClickListener() { public void onClick(View v) { findNearby(); } }), weighted(12));
         root.addView(btns2, margins(-1, 12));
 
         // Activity list
@@ -393,6 +396,32 @@ public class MainActivity extends Activity implements Server.Host {
         return null;
     }
 
+    /** Phone to phone: find other phones running Drop and open the chosen one's page in the browser. */
+    private void findNearby() {
+        toast("Looking for phones running Drop\u2026");
+        new Thread(new Runnable() { public void run() {
+            List<String> found = new ArrayList<String>();
+            try (DatagramSocket s = new DatagramSocket()) {
+                bindToWifi(s);
+                // shortcut: limited broadcast only; add the subnet's directed broadcast if some routers drop it
+                found = Server.probe(s, InetAddress.getByName("255.255.255.255"), selfIp, 1500);
+            } catch (Exception e) { }
+            final List<String> list = found;
+            main.post(new Runnable() { public void run() { showNearby(list); } });
+        } }, "drop-nearby").start();
+    }
+
+    private void showNearby(final List<String> list) {
+        if (isFinishing()) return;
+        if (list.isEmpty()) { toast("No other phone found. Open Drop on it (same Wi\u2011Fi) and try again."); return; }
+        new AlertDialog.Builder(this)
+            .setTitle("Open which device?")
+            .setItems(list.toArray(new String[0]), new DialogInterface.OnClickListener() { public void onClick(DialogInterface d, int w) {
+                launch(new Intent(Intent.ACTION_VIEW, Uri.parse("http://" + list.get(w) + "/")));
+            } })
+            .show();
+    }
+
     public void bindToWifi(DatagramSocket s) {
         Network n = wifi();
         if (n != null) try { n.bindSocket(s); } catch (Exception e) { }
@@ -418,6 +447,7 @@ public class MainActivity extends Activity implements Server.Host {
                 }
             }
         } catch (Exception e) { }
+        selfIp = ip;
         urlView.setText(ip == null ? "Not connected to Wi‑Fi" : ip + ":" + server.port);
     }
 
