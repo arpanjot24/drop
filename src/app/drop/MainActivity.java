@@ -466,7 +466,7 @@ public class MainActivity extends Activity implements Server.Host {
         else if (kept == null) wifiView.setText("Wi‑Fi: " + now + "   \u00b7   tap to keep this one");
         else if (kept.equals(now)) wifiView.setText("Wi‑Fi: " + now + "  \u2713 kept   (tap to stop)");
         else {
-            wifiView.setTextColor(Color.rgb(0xD9, 0x30, 0x25));
+            wifiView.setTextColor(col(RED));
             wifiView.setText("\u26a0 On " + now + ", not " + kept + ". Tap to switch back.");
         }
     }
