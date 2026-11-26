@@ -23,6 +23,10 @@ import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
+import android.content.pm.PackageManager;
+import android.graphics.Color;
+import android.provider.Settings;
 import android.net.Uri;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -74,7 +78,8 @@ public class MainActivity extends Activity implements Server.Host {
     private static final Set<String> asking = Collections.synchronizedSet(new HashSet<String>());
 
     private final Handler main = new Handler(Looper.getMainLooper());
-    private TextView urlView;
+    private TextView urlView, wifiView;
+    private ConnectivityManager.NetworkCallback wifiWatch;
     private LinearLayout listView;
     private int pad;
     private byte[] page;
@@ -125,6 +130,20 @@ public class MainActivity extends Activity implements Server.Host {
             toast("Address copied");
         } });
         root.addView(conn, margins(-1, 16));
+
+        // Android 10+ won't let an app pick the phone's Wi-Fi, so Drop remembers one and warns when the phone hops.
+        wifiView = text("", 14, col(FG), false);
+        wifiView.setPadding(dp(4), dp(10), dp(4), 0);
+        wifiView.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { onWifiTap(); } });
+        root.addView(wifiView, margins(-1, 0));
+        wifiWatch = new ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(Network n) { refresh(); }
+            @Override public void onLost(Network n) { refresh(); }
+            @Override public void onCapabilitiesChanged(Network n, NetworkCapabilities c) { refresh(); }
+            void refresh() { main.post(new Runnable() { public void run() { showUrl(); } }); }
+        };
+        ((ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE)).registerNetworkCallback(
+            new NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(), wifiWatch);
 
         // Main actions
         LinearLayout btns = row();
@@ -211,6 +230,7 @@ public class MainActivity extends Activity implements Server.Host {
 
     @Override protected void onDestroy() {
         super.onDestroy();
+        try { ((ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE)).unregisterNetworkCallback(wifiWatch); } catch (Exception e) { }
         if (isFinishing() && server != null) { server.stop(); server = null; }
     }
 
@@ -427,6 +447,45 @@ public class MainActivity extends Activity implements Server.Host {
         if (n != null) try { n.bindSocket(s); } catch (Exception e) { }
     }
 
+    /** Current Wi-Fi name, or null if unknown (no location permission, Location switched off, or not on Wi-Fi). */
+    private String ssid() {
+        try {
+            String s = ((WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE)).getConnectionInfo().getSSID();
+            if (s == null || s.equals("<unknown ssid>")) return null;
+            return s.startsWith("\"") && s.endsWith("\"") ? s.substring(1, s.length() - 1) : s;
+        } catch (Exception e) { return null; }
+    }
+
+    private boolean canSeeSsid() { return checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED; }
+
+    private void showWifi() {
+        String now = ssid(), kept = prefs().getString("wifi", null);
+        wifiView.setTextColor(col(FG));
+        if (!canSeeSsid()) wifiView.setText("Tap to choose a Wi‑Fi for Drop to keep");
+        else if (now == null) wifiView.setText("Wi‑Fi name hidden: turn on Location, or connect to Wi‑Fi");
+        else if (kept == null) wifiView.setText("Wi‑Fi: " + now + "   \u00b7   tap to keep this one");
+        else if (kept.equals(now)) wifiView.setText("Wi‑Fi: " + now + "  \u2713 kept   (tap to stop)");
+        else {
+            wifiView.setTextColor(Color.rgb(0xD9, 0x30, 0x25));
+            wifiView.setText("\u26a0 On " + now + ", not " + kept + ". Tap to switch back.");
+        }
+    }
+
+    private void onWifiTap() {
+        if (!canSeeSsid()) {   // Android only reveals Wi-Fi names to apps with location permission
+            requestPermissions(new String[] { android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION }, 2);
+            return;
+        }
+        String now = ssid(), kept = prefs().getString("wifi", null);
+        if (now == null) { launch(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)); return; }
+        if (kept != null && !kept.equals(now)) { launch(new Intent(Settings.Panel.ACTION_WIFI)); return; }
+        prefs().edit().putString("wifi", kept == null ? now : null).apply();
+        if (kept == null) toast("Drop will warn you if the phone joins another Wi‑Fi");
+        showWifi();
+    }
+
+    @Override public void onRequestPermissionsResult(int req, String[] perms, int[] res) { showWifi(); }
+
     private void showUrl() {
         if (server == null) return;
         String ip = null;
@@ -448,6 +507,7 @@ public class MainActivity extends Activity implements Server.Host {
             }
         } catch (Exception e) { }
         selfIp = ip;
+        showWifi();
         urlView.setText(ip == null ? "Not connected to Wi‑Fi" : ip + ":" + server.port);
     }
 
